@@ -1,0 +1,18 @@
+# 基金投资助手 — 依赖包列表
+# 安装方式：pip install -r requirements.txt
+
+# Web 框架（仪表盘）
+streamlit>=1.28.0
+
+# 基金数据接口
+akshare>=1.12.0
+
+# 数据处理
+pandas>=2.0.0
+numpy>=1.24.0
+
+# 交互式图表
+plotly>=5.0.0
+
+# AI 接口（调用 DeepSeek API）
+openai>=1.0.0
