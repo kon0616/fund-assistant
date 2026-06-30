@@ -293,17 +293,17 @@ with tab1:
 
     warnings_found = False
     for s in snapshots:
-        change = abs(s.daily_change)
-        if change >= WARNING_RED:
+        # 只对下跌触发预警，上涨不需要警告
+        if s.daily_change <= -WARNING_RED:
             st.markdown(f"""
             <div class="warning-red">
-                🔴 <b>{s.name}</b>（{s.sector}）跌 {s.daily_change*100:+.2f}% — 超4%红色预警，建议评估是否减仓或调仓
+                🔴 <b>{s.name}</b>（{s.sector}）下跌 {abs(s.daily_change)*100:.2f}% — 超4%红色预警，建议评估是否减仓或调仓
             </div>""", unsafe_allow_html=True)
             warnings_found = True
-        elif change >= WARNING_YELLOW:
+        elif s.daily_change <= -WARNING_YELLOW:
             st.markdown(f"""
             <div class="warning-yellow">
-                🟡 <b>{s.name}</b>（{s.sector}）跌 {s.daily_change*100:+.2f}% — 超2.5%黄色预警，关注后续走势
+                🟡 <b>{s.name}</b>（{s.sector}）下跌 {abs(s.daily_change)*100:.2f}% — 超2.5%黄色预警，关注后续走势
             </div>""", unsafe_allow_html=True)
             warnings_found = True
 
@@ -386,9 +386,9 @@ with tab2:
 
     alert_list = []
     for s in snapshots:
-        chg = abs(s.daily_change)
-        if chg >= WARNING_YELLOW:
-            level = "🔴 红色" if chg >= WARNING_RED else "🟡 黄色"
+        # 只对下跌触发预警
+        if s.daily_change <= -WARNING_YELLOW:
+            level = "🔴 红色" if s.daily_change <= -WARNING_RED else "🟡 黄色"
             alert_list.append({
                 "基金": s.name,
                 "赛道": s.sector,
