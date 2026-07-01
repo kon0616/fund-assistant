@@ -88,6 +88,42 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 DEEPSEEK_MODEL = "deepseek-chat"
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 
+# ============================================================
+# 交易时段判断
+# ============================================================
+
+def is_trading_day() -> bool:
+    """判断今天是否为交易日（简化：周一到周五，不含节假日）"""
+    return datetime.date.today().weekday() < 5
+
+
+def is_trading_hours() -> bool:
+    """判断当前是否在交易时段（9:30-15:00）"""
+    now = datetime.datetime.now()
+    return is_trading_day() and datetime.time(9, 30) <= now.time() <= datetime.time(15, 0)
+
+
+def is_after_nav_publish() -> bool:
+    """判断是否已过净值公布时间（20:00之后）"""
+    now = datetime.datetime.now()
+    return now.time() >= datetime.time(20, 0)
+
+
+def get_nav_display_mode() -> str:
+    """
+    净值显示模式：
+    - "trading": 交易时段，不显示今日涨跌，显示上一交易日净值
+    - "waiting": 收盘后但净值未公布（15:00-20:00），显示估算涨跌
+    - "published": 20:00之后，显示官方净值
+    """
+    if is_trading_hours():
+        return "trading"
+    elif not is_after_nav_publish() and is_trading_day():
+        return "waiting"
+    else:
+        return "published"
+
+
 # 学习术语
 GLOSSARY_TERMS = [
     {"term": "最大回撤", "explanation": "在选定周期内，基金净值从最高点跌到最低点的最大跌幅。比如从1.5跌到1.2再涨回去，最大回撤=(1.5-1.2)/1.5=20%。回撤越小，基金经理风控能力越强。"},
@@ -1269,6 +1305,47 @@ def generate_industry_explainer(industry_name: str, api_key: str = None) -> str:
 # ============================================================
 # 自测
 # ============================================================
+
+def generate_market_preview(snapshots: list[FundSnapshot], api_key: str = None) -> dict:
+    """
+    生成今日市场预判（行业动态+机构观点+操作参考）
+    """
+    key = api_key or DEEPSEEK_API_KEY
+    # 获取与持仓相关的行业新闻
+    sectors = list(set(s.sector for s in snapshots))
+    keywords = []
+    for s in sectors:
+        for part in s.split("/"):
+            if part not in keywords:
+                keywords.append(part[:4])
+    news_text = fetch_financial_news(keywords[:5])
+
+    if key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
+            sectors_str = "、".join(sectors)
+            system = """你是金融市场分析师。用大白话给基金新手写市场预判。每段不超过3句话，不要术语。输出JSON：{"industry_news":"行业动态(3-5条)","institution_view":"机构观点(1-2句)","action_ref":"操作参考(简单结论+风险提示+一句话总结)"}"""
+            response = client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": f"持仓赛道：{sectors_str}\n相关新闻：{news_text}\n请生成今日市场预判"},
+                ],
+                temperature=0.7, max_tokens=500,
+                response_format={"type": "json_object"},
+            )
+            return json.loads(response.choices[0].message.content)
+        except Exception:
+            pass
+
+    # 降级：简单模板
+    return {
+        "industry_news": f"今日关注赛道：{'、'.join(sectors)}。相关行业动态请关注东方财富或同花顺APP。",
+        "institution_view": "暂无最新机构观点数据，建议每日开盘前查看券商晨报。",
+        "action_ref": "📌 一句话总结：持仓方向聚焦科技成长，坚持定投纪律，短期波动不改长期趋势。",
+    }
+
 
 if __name__ == "__main__":
     print("=" * 60)

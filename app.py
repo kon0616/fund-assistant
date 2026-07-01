@@ -31,6 +31,10 @@ from data_manager import (
     generate_market_aware_recommendations,
     generate_ai_briefing,
     generate_industry_explainer,
+    generate_market_preview,
+    get_nav_display_mode,
+    is_trading_hours,
+    is_after_nav_publish,
     get_random_term,
     GLOSSARY_TERMS,
 )
@@ -191,10 +195,20 @@ industry = analyze_industry_concentration(snapshots)
 hedging = analyze_hedging(snapshots)
 health = analyze_portfolio_health(snapshots)
 
+# NAV 显示模式
+nav_mode = get_nav_display_mode()
+
 # 市场主线（缓存友好，仅在非mock模式下获取）
 if "market_themes" not in st.session_state or use_mock:
     st.session_state["market_themes"] = fetch_market_themes() if not use_mock else []
 themes = st.session_state["market_themes"]
+
+# 市场预判（缓存：每天只生成一次）
+today_key = datetime.now().strftime("%Y%m%d")
+if "market_preview" not in st.session_state or st.session_state.get("preview_date") != today_key:
+    st.session_state["market_preview"] = generate_market_preview(snapshots, api_key=ai_key if use_ai else None)
+    st.session_state["preview_date"] = today_key
+preview = st.session_state["market_preview"]
 
 # 风险偏好（session_state 持久化）
 if "risk_preference" not in st.session_state:
@@ -225,7 +239,27 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 今日看板", "🛡️ 风险分析", "
 # ============================================================
 
 with tab1:
-    # ---- 大盘指数卡片 ----
+    # ---- 市场预判 ----
+    st.markdown("### 🔮 今日市场预判")
+    if preview:
+        with st.expander("展开查看行业动态 / 机构观点 / 操作参考", expanded=False):
+            col_a, col_b, col_c = st.columns(3)
+            with col_a:
+                st.markdown("**📰 行业动态**")
+                st.caption(preview.get("industry_news", "暂无"))
+            with col_b:
+                st.markdown("**🏦 机构观点**")
+                st.caption(preview.get("institution_view", "暂无"))
+            with col_c:
+                st.markdown("**📌 操作参考**")
+                st.info(preview.get("action_ref", "暂无"))
+
+    # ---- NAV 状态条 ----
+    if nav_mode == "trading":
+        st.info("📌 当前为交易时段（9:30-15:00），今日净值将于20:00后公布，以下显示上一交易日官方净值。")
+    elif nav_mode == "waiting":
+        st.warning("⏳ 已收盘，净值核算中，以下为估算数据。官方净值约在20:00后公布。")
+
     # ---- 今日市场主线 ----
     if themes and not use_mock:
         st.markdown("### 🔍 今日市场主线")
@@ -335,7 +369,9 @@ with tab1:
     df["近1周_str"] = df["近1周"].apply(pct_formatter)
 
     display_df = df[["基金名称", "代码", "赛道", "最新净值", "今日涨跌_str", "近3日_str", "近5日_str", "近1周_str"]]
-    display_df.columns = ["基金名称", "代码", "赛道", "最新净值", "今日涨跌", "近3日", "近5日", "近1周"]
+    # 交易时段用"上一交易日涨跌"，20:00后用"今日涨跌"
+    change_label = "今日涨跌" if nav_mode == "published" else "上一交易日涨跌"
+    display_df.columns = ["基金名称", "代码", "赛道", "最新净值", change_label, "近3日", "近5日", "近1周"]
 
     st.dataframe(
         display_df,
@@ -345,6 +381,8 @@ with tab1:
     )
 
     # ---- 涨跌预警 ----
+    if nav_mode != "published":
+        st.caption("⚠️ 净值尚未正式公布，预警基于上一交易日数据")
     st.markdown("##### 🔔 波动预警")
 
     warnings_found = False
