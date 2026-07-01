@@ -780,6 +780,200 @@ def generate_recommendations(
 
 
 # ============================================================
+# 实时市场感知模块（v2.1 升级）
+# ============================================================
+
+@dataclass
+class MarketTheme:
+    """市场主线主题"""
+    name: str           # 板块名称
+    change_pct: float   # 涨跌幅
+    is_hot: bool        # 是否热点板块
+
+
+@dataclass
+class FundManagerInfo:
+    """基金经理信息"""
+    name: str
+    fund_name: str
+    experience_years: str  # 从业年限
+    manage_duration: str   # 管理本基金时长
+    return_during_tenure: str  # 任职回报
+    aum: str              # 管理规模
+
+
+def fetch_market_themes() -> list[MarketTheme]:
+    """获取今日市场热点板块（概念板块涨幅排名）"""
+    try:
+        import akshare as ak
+        df = ak.stock_board_concept_name_em()
+        if df is None or df.empty:
+            return []
+        # 按涨跌幅降序排列，取前5
+        cols = list(df.columns)
+        name_col = cols[1] if len(cols) > 1 else None
+        change_col = cols[5] if len(cols) > 5 else None
+        if name_col is None or change_col is None:
+            return []
+        df["_change"] = pd.to_numeric(df[change_col], errors="coerce")
+        top = df.nlargest(5, "_change")
+        themes = []
+        for _, row in top.iterrows():
+            chg = float(row[change_col])
+            themes.append(MarketTheme(
+                name=str(row[name_col]),
+                change_pct=round(chg / 100.0 if abs(chg) > 1 else chg, 4),
+                is_hot=abs(chg) > 3,
+            ))
+        return themes
+    except Exception as e:
+        print(f"[警告] 市场主线获取失败: {e}")
+        return []
+
+
+def fetch_fund_manager_info(fund_code: str) -> Optional[FundManagerInfo]:
+    """获取基金经理信息（缓存7天）"""
+    try:
+        import akshare as ak
+        # fund_manager_em 的参数名可能是 fund 而非 symbol
+        for param in ["fund", "symbol"]:
+            try:
+                df = ak.fund_manager_em(**{param: fund_code})
+                if df is not None and not df.empty:
+                    row = df.iloc[0]
+                    cols = list(df.columns)
+                    name_col = next((c for c in cols if "姓名" in str(c)), None)
+                    return FundManagerInfo(
+                        name=str(row[name_col]) if name_col else "未知",
+                        fund_name=fund_code,
+                        experience_years=str(row.iloc[3]) if len(row) > 3 else "未知",
+                        manage_duration=str(row.iloc[4]) if len(row) > 4 else "未知",
+                        return_during_tenure=str(row.iloc[5]) if len(row) > 5 else "未知",
+                        aum=str(row.iloc[6]) if len(row) > 6 else "未知",
+                    )
+            except TypeError:
+                continue
+        return None
+    except Exception as e:
+        print(f"[调试] 基金经理{fund_code}获取失败: {e}")
+        return None
+
+
+def fetch_reference_fund_performance(codes: list[str]) -> dict:
+    """批量获取参考基金的近期表现（用于推荐时的市场状态）"""
+    result = {}
+    for code in codes:
+        data = fetch_fund_nav_akshare(code)
+        if data:
+            result[code] = {
+                "latest_nav": data["latest_nav"],
+                "daily_change": data["daily_change"],
+            }
+    return result
+
+
+def generate_market_aware_recommendations(
+    snapshots: list[FundSnapshot],
+    health: PortfolioHealth,
+    themes: list[MarketTheme],
+    api_key: str = None,
+    preference: str = "不确定",
+) -> list[dict]:
+    """
+    基于实时市场状态的智能推荐（v2.1）
+    - 联网获取市场热点
+    - 获取参考基金实时表现
+    - AI 分析后给出诚实建议（不推荐正在下跌的资产）
+    """
+    key = api_key or DEEPSEEK_API_KEY
+    if not key:
+        # 无 AI 时降级到规则推荐
+        return generate_recommendations(snapshots, health, preference)
+
+    # 获取参考基金的实时表现
+    ref_codes = ["518880", "110037", "512890", "161725", "003095", "511010", "589130"]
+    ref_perf = fetch_reference_fund_performance(ref_codes)
+
+    # 构建市场主线文本
+    theme_text = ""
+    if themes:
+        hot_names = [t.name for t in themes[:3]]
+        theme_text = f"今日市场热点板块（涨幅前三）：{', '.join(hot_names)}。"
+
+    # 构建参考基金表现文本
+    ref_text = ""
+    for code, perf in ref_perf.items():
+        ref_text += f"{code}：净值{perf['latest_nav']:.4f}，今日{perf['daily_change']*100:+.2f}%\n"
+
+    # 构建持仓文本
+    holding_text = ""
+    for s in snapshots:
+        holding_text += (
+            f"{s.name}（{s.code}，{s.sector}）："
+            f"今日{s.daily_change*100:+.2f}%，近3日{s.change_3d*100:+.2f}%，"
+            f"近1周{s.change_1w*100:+.2f}%\n"
+        )
+
+    # AI prompt
+    system_prompt = """你是一位专业的基金投资顾问，拥有10年经验。用户是基金新手。
+
+## 核心原则：诚实反映市场状态
+- 绝对不能为了"配置均衡"而推荐正在大跌的资产
+- 如果某个品种近期一直在跌，必须如实告诉用户"现在不适合买入"
+- 如果用户持仓与市场主线一致，鼓励持有而不是盲目调仓
+- 每条建议必须包含：当前市场状态 + 为什么现在适合/不适合 + 具体操作
+
+## 输出格式
+JSON数组，每条建议包含：
+- action: 操作（买入/卖出/持有/关注/暂缓）
+- fund_name: 基金名称+代码
+- market_state: 该品种当前市场状态（1句话：近1月涨跌、资金流向、是否主线）
+- reason: 推荐理由（为什么现在适合/不适合，结合实时数据，说白话）
+- risk: 当前买入的最大风险是什么
+- suggested_pct: 建议比例（如"10%"或"—"）
+- priority: 优先级（high/medium/low）"""
+
+    user_prompt = f"""用户风险偏好：{preference}
+
+{theme_text}
+
+用户当前持仓：
+{holding_text}
+健康度：进攻仓{health.offense_pct:.0f}%，防守仓{health.defense_pct:.0f}%，避险仓{health.safe_haven_pct:.0f}%
+
+备选参考基金今日表现：
+{ref_text}
+
+请基于以上实时数据，给出3-4条市场感知的投资建议（JSON数组格式）。
+要求：如果备选基金中某个品种今日大跌，不要推荐它，如实说明原因并给出替代方案。"""
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=0.7,
+            max_tokens=1200,
+            response_format={"type": "json_object"},
+        )
+        content = response.choices[0].message.content
+        data = json.loads(content)
+        # AI may return {"recommendations": [...]} or just [...]
+        if isinstance(data, dict):
+            recs = data.get("recommendations", [data])
+        else:
+            recs = data if isinstance(data, list) else []
+        return recs
+    except Exception as e:
+        print(f"[警告] AI推荐生成失败: {e}")
+        return generate_recommendations(snapshots, health, preference)
+
+
+# ============================================================
 # 金融新闻获取（用于AI简报的联网信息）
 # ============================================================
 

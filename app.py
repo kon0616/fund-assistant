@@ -22,10 +22,13 @@ from data_manager import (
     get_all_snapshots,
     generate_mock_index_data,
     fetch_index_data,
+    fetch_market_themes,
+    fetch_fund_manager_info,
     analyze_industry_concentration,
     analyze_hedging,
     analyze_portfolio_health,
     generate_recommendations,
+    generate_market_aware_recommendations,
     generate_ai_briefing,
     get_random_term,
     GLOSSARY_TERMS,
@@ -174,6 +177,11 @@ industry = analyze_industry_concentration(snapshots)
 hedging = analyze_hedging(snapshots)
 health = analyze_portfolio_health(snapshots)
 
+# 市场主线（缓存友好，仅在非mock模式下获取）
+if "market_themes" not in st.session_state or use_mock:
+    st.session_state["market_themes"] = fetch_market_themes() if not use_mock else []
+themes = st.session_state["market_themes"]
+
 # 风险偏好（session_state 持久化）
 if "risk_preference" not in st.session_state:
     st.session_state["risk_preference"] = "不确定"
@@ -204,6 +212,25 @@ tab1, tab2, tab3, tab4 = st.tabs(["📊 今日看板", "🛡️ 风险分析", "
 
 with tab1:
     # ---- 大盘指数卡片 ----
+    # ---- 今日市场主线 ----
+    if themes and not use_mock:
+        st.markdown("### 🔍 今日市场主线")
+        theme_names = ", ".join(f"{t.name}({t.change_pct*100:+.2f}%)" for t in themes[:3])
+        # 判断持仓与主线匹配度
+        holding_sectors = set(s.sector for s in snapshots)
+        theme_keywords = []
+        for t in themes:
+            theme_keywords.extend(t.name.split(" ")[:2])
+        match_count = sum(1 for kw in theme_keywords for hs in holding_sectors if kw in hs or hs in kw)
+        if match_count >= 3:
+            match_text = "✅ 高度吻合 — 你的持仓与今日市场主线一致，当前方向正确，不要因为短期波动卖出。"
+        elif match_count >= 1:
+            match_text = "🟡 部分吻合 — 你的持仓部分覆盖了今日热点，但有一些热门方向你还没有配置。"
+        else:
+            match_text = f"🔴 偏离较大 — 今日市场热点是{theme_names[:50]}...，你的持仓中缺少这个方向。可以考虑小仓位关注，但不要追高。"
+
+        st.info(f"📌 今日热点板块：{theme_names}  |  {match_text}")
+
     st.markdown("### 📈 今日大盘温度")
 
     if indices:
@@ -404,6 +431,29 @@ with tab2:
     else:
         st.success("无异常波动，所有基金运行平稳。")
 
+    # ---- 基金经理 ----
+    st.markdown("---")
+    st.markdown("#### 👤 基金经理档案")
+
+    if st.button("👤 查看基金经理", use_container_width=True, key="show_managers"):
+        with st.spinner("获取基金经理信息..."):
+            manager_data = []
+            for s in snapshots:
+                info = fetch_fund_manager_info(s.code)
+                if info:
+                    manager_data.append({
+                        "基金": s.name[:15] + "...",
+                        "基金经理": info.name,
+                        "从业年限": info.experience_years,
+                        "管理时长": info.manage_duration,
+                        "任职回报": info.return_during_tenure,
+                        "管理规模": info.aum,
+                    })
+            if manager_data:
+                st.dataframe(pd.DataFrame(manager_data), use_container_width=True, hide_index=True)
+            else:
+                st.info("暂未获取到基金经理数据，请稍后重试")
+
 
 # ============================================================
 # Tab 3: AI简报
@@ -540,24 +590,48 @@ with tab4:
     pref_map = {"我偏好稳健": "稳健", "我偏好进取": "进取", "不确定": "不确定"}
     st.session_state["risk_preference"] = pref_map[pref]
 
-    recs = generate_recommendations(snapshots, health, st.session_state["risk_preference"])
+    # 优先使用 AI 市场感知推荐，降级到规则推荐
+    if use_ai:
+        recs = generate_market_aware_recommendations(
+            snapshots, health, themes, api_key=ai_key,
+            preference=st.session_state["risk_preference"]
+        )
+    else:
+        recs = generate_recommendations(snapshots, health, st.session_state["risk_preference"])
 
     if recs:
         for i, r in enumerate(recs, 1):
-            op_color = {
-                "🟢 买入": "#d4edda",
-                "🟢 买入（小仓位）": "#d4edda",
-                "🔴 考虑卖出": "#f8d7da",
-                "🔴 暂停买入": "#fff3cd",
-                "🟡 观察": "#e8eaf6",
-                "🟡 持有不动": "#e8eaf6",
-            }.get(r["操作"], "#f8f9fa")
+            # 兼容两种格式：AI返回(action/fund_name/reason/suggested_pct) 和 规则返回(操作/基金名称/理由/建议比例)
+            action = r.get("action", r.get("操作", ""))
+            fund_name = r.get("fund_name", r.get("基金名称", ""))
+            reason = r.get("reason", r.get("理由", ""))
+            pct = r.get("suggested_pct", r.get("建议比例", ""))
+            market_state = r.get("market_state", "")
+            risk = r.get("risk", "")
+
+            action_lower = action.lower()
+            if "买入" in action or "buy" in action_lower:
+                bg = "#d4edda"
+            elif "卖出" in action or "sell" in action_lower:
+                bg = "#f8d7da"
+            elif "暂停" in action or "暂缓" in action or "avoid" in action_lower:
+                bg = "#fff3cd"
+            elif "持有" in action or "hold" in action_lower:
+                bg = "#e8eaf6"
+            else:
+                bg = "#f8f9fa"
+
+            extra_lines = ""
+            if market_state:
+                extra_lines += f"📊 <b>当前市场状态：</b>{market_state}<br>"
+            if risk:
+                extra_lines += f"⚠️ <b>风险提示：</b>{risk}<br>"
 
             st.markdown(f"""
-            <div style="padding:14px 16px; margin:8px 0; background:{op_color}; border-radius:8px; line-height:2;">
-                <b>📌 建议{i}：</b>{r['操作']} — <b>{r['基金名称']}</b><br>
-                📝 <b>理由：</b>{r['理由']}<br>
-                📊 <b>建议比例：</b>{r['建议比例']}
+            <div style="padding:14px 16px; margin:8px 0; background:{bg}; border-radius:8px; line-height:2;">
+                <b>📌 建议{i}：</b>{action} — <b>{fund_name}</b><br>
+                {extra_lines}📝 <b>理由：</b>{reason}<br>
+                📊 <b>建议比例：</b>{pct}
             </div>
             """, unsafe_allow_html=True)
     else:
