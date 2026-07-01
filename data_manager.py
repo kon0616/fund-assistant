@@ -831,29 +831,47 @@ def fetch_market_themes() -> list[MarketTheme]:
         return []
 
 
-def fetch_fund_manager_info(fund_code: str) -> Optional[FundManagerInfo]:
-    """获取基金经理信息（缓存7天）"""
+# 基金经理全量数据缓存（全局，避免重复拉取）
+_manager_cache: Optional[pd.DataFrame] = None
+
+
+def _get_manager_df() -> Optional[pd.DataFrame]:
+    """获取全量基金经理数据（只拉取一次）"""
+    global _manager_cache
+    if _manager_cache is not None:
+        return _manager_cache
     try:
         import akshare as ak
-        # fund_manager_em 的参数名可能是 fund 而非 symbol
-        for param in ["fund", "symbol"]:
-            try:
-                df = ak.fund_manager_em(**{param: fund_code})
-                if df is not None and not df.empty:
-                    row = df.iloc[0]
-                    cols = list(df.columns)
-                    name_col = next((c for c in cols if "姓名" in str(c)), None)
-                    return FundManagerInfo(
-                        name=str(row[name_col]) if name_col else "未知",
-                        fund_name=fund_code,
-                        experience_years=str(row.iloc[3]) if len(row) > 3 else "未知",
-                        manage_duration=str(row.iloc[4]) if len(row) > 4 else "未知",
-                        return_during_tenure=str(row.iloc[5]) if len(row) > 5 else "未知",
-                        aum=str(row.iloc[6]) if len(row) > 6 else "未知",
-                    )
-            except TypeError:
-                continue
+        _manager_cache = ak.fund_manager_em()
+        return _manager_cache
+    except Exception:
         return None
+
+
+def fetch_fund_manager_info(fund_code: str) -> Optional[FundManagerInfo]:
+    """获取基金经理信息（首次调用约10秒，后续从缓存秒出）"""
+    try:
+        df = _get_manager_df()
+        if df is None or df.empty:
+            return None
+        cols = list(df.columns)
+        # 列：序号/姓名/所属公司/现任基金代码/现任基金名称/累计从业时间/现任基金资产总规模/现任基金最佳回报
+        code_col = next((c for c in cols if "代码" in str(c)), None)
+        name_col = next((c for c in cols if "姓名" in str(c)), None)
+        if code_col is None:
+            return None
+        match = df[df[code_col].astype(str).str.strip() == fund_code]
+        if match.empty:
+            return None
+        row = match.iloc[0]
+        return FundManagerInfo(
+            name=str(row[name_col]) if name_col else "未知",
+            fund_name=fund_code,
+            experience_years=f"{row.iloc[5]}天" if len(row) > 5 else "未知",
+            manage_duration="—",
+            return_during_tenure=f"{row.iloc[7]}%" if len(row) > 7 and pd.notna(row.iloc[7]) else "未知",
+            aum=f"{row.iloc[6]}亿" if len(row) > 6 and pd.notna(row.iloc[6]) else "未知",
+        )
     except Exception as e:
         print(f"[调试] 基金经理{fund_code}获取失败: {e}")
         return None
