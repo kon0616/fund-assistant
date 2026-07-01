@@ -30,6 +30,7 @@ from data_manager import (
     generate_recommendations,
     generate_market_aware_recommendations,
     generate_ai_briefing,
+    generate_industry_explainer,
     get_random_term,
     GLOSSARY_TERMS,
 )
@@ -138,6 +139,19 @@ with st.sidebar:
                 st.rerun()
 
     st.markdown("---")
+    # ---- 行业科普卡片 ----
+    st.markdown("---")
+    st.subheader("📖 行业科普")
+    explain_topic = st.text_input("输入板块名称", placeholder="例：猪肉概念、半导体", key="explain_topic")
+    if st.button("❓ 这是什么行业？", use_container_width=True, key="explain_btn"):
+        if explain_topic.strip():
+            with st.spinner("生成行业科普卡片..."):
+                card = generate_industry_explainer(explain_topic.strip(), api_key=ai_key if use_ai else None)
+                st.session_state["explain_result"] = card
+    if "explain_result" in st.session_state and st.session_state["explain_result"]:
+        st.markdown(f"""<div class="term-card" style="max-height:400px; overflow-y:auto;">{st.session_state['explain_result']}</div>""", unsafe_allow_html=True)
+
+    st.markdown("---")
     st.caption(f"更新时间: {datetime.now().strftime('%m-%d %H:%M')}")
 
 
@@ -223,13 +237,28 @@ with tab1:
             theme_keywords.extend(t.name.split(" ")[:2])
         match_count = sum(1 for kw in theme_keywords for hs in holding_sectors if kw in hs or hs in kw)
         if match_count >= 3:
-            match_text = "✅ 高度吻合 — 你的持仓与今日市场主线一致，当前方向正确，不要因为短期波动卖出。"
+            match_level = "high"
+            st.success(f"📌 今日热点：{theme_names}\n\n✅ 高度吻合 — 你的持仓与今日市场主线一致。")
         elif match_count >= 1:
-            match_text = "🟡 部分吻合 — 你的持仓部分覆盖了今日热点，但有一些热门方向你还没有配置。"
+            st.info(f"📌 今日热点：{theme_names}\n\n🟡 部分吻合 — 你的持仓部分覆盖了今日热点，未覆盖的方向可以了解，但不要因「错过」而焦虑追高。")
         else:
-            match_text = f"🔴 偏离较大 — 今日市场热点是{theme_names[:50]}...，你的持仓中缺少这个方向。可以考虑小仓位关注，但不要追高。"
-
-        st.info(f"📌 今日热点板块：{theme_names}  |  {match_text}")
+            # ---- 小白保护模式 ----
+            st.markdown(f"""
+            <div style="background:#fff3cd; padding:12px; border-radius:8px; border-left:4px solid #ffc107; margin-bottom:8px;">
+                <b>🔍 今日市场热点：</b>{theme_names}
+            </div>
+            <div style="background:#f8d7da; padding:16px; border-radius:8px; margin:8px 0; border-left:4px solid #dc3545;">
+                <b>📊 与你的持仓匹配度：🔴 偏离较大</b>
+            </div>
+            """, unsafe_allow_html=True)
+            st.warning("💡 **新手提示**：这些是【短线炒作型题材】，通常持续性不强。你的持仓聚焦科技/半导体（长期产业趋势），**不需要追逐每一个热点**。")
+            with st.expander("🤔 如果要参与，请先问自己三个问题", expanded=True):
+                st.markdown("""
+                1. **我了解这个行业吗？** — 养猪/养鸡/化工材料/概念炒作……你了解多少？
+                2. **这个热点已经涨了不少，我现在冲进去是不是在「接盘」？** — 追高是新手亏钱的第一大原因。
+                3. **如果我买了跌了，我知道什么时候卖吗？** — 没有计划的买入 = 赌博。
+                """)
+            st.info("📌 **系统建议**：\n- ❌ 不建议追高买入这些概念股/基金\n- ✅ 继续专注于你的科技/半导体持仓，这才是你的「能力圈」")
 
     st.markdown("### 📈 今日大盘温度")
 

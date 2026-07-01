@@ -1233,6 +1233,39 @@ def get_random_term() -> dict:
     return random.choice(GLOSSARY_TERMS)
 
 
+def generate_industry_explainer(industry_name: str, api_key: str = None) -> str:
+    """生成行业科普卡片（AI优先，规则降级）"""
+    key = api_key or DEEPSEEK_API_KEY
+    if key:
+        try:
+            from openai import OpenAI
+            client = OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
+            response = client.chat.completions.create(
+                model=DEEPSEEK_MODEL,
+                messages=[
+                    {"role": "system", "content": "你是行业研究专家。用大白话解释一个行业/概念板块，面向基金新手。输出不要超过400字。"},
+                    {"role": "user", "content": f"请用大白话介绍「{industry_name}」这个板块：1)它是做什么的 2)涨跌受什么影响 3)适合长期持有还是短期炒作 4)当前机构怎么看"},
+                ],
+                temperature=0.7,
+                max_tokens=500,
+            )
+            return response.choices[0].message.content
+        except Exception:
+            pass
+
+    # 规则降级
+    return f"""
+**{industry_name}** 是一个A股概念板块。
+
+💡 **它是做什么的**：该板块包含与「{industry_name}」相关的上市公司。概念板块通常基于某个主题或政策热点形成。
+
+📊 **涨跌受什么影响**：概念板块的涨跌通常受政策消息、市场情绪和资金面驱动。短期波动可能较大。
+
+⚠️ **适合长期还是短期**：概念板块更适合短期交易，不太适合长期持有。如果你不了解这个行业，建议先学习再决定是否参与。
+
+📌 **当前机构观点**：暂无最新研报数据。建议通过东方财富或同花顺搜索「{industry_name} 研报」查看机构最新观点。
+"""
+
 # ============================================================
 # 自测
 # ============================================================
